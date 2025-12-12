@@ -1,0 +1,114 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtual Environments =====
+.venv/
+venv/
+ENV/
+env/
+.venv
+
+# ===== Project-Specific (Sensitive/Generated) =====
+fb_cookies.json                # Facebook login cookies - KEEP PRIVATE!
+seen_posts.db                  # SQLite deduplication database
+seen_posts.db-journal          # SQLite journal file
+*.log                          # Log files
+monitor.log                    # Monitor output log
+
+# ===== IDE & Editors =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+*.iml
+
+# ===== OS Files =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ===== Environment Files =====
+.env
+.env.local
+.env.*.local
+.secrets
+
+# ===== Pytest & Testing =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# ===== Jupyter/IPython =====
+.ipynb_checkpoints
+*.ipynb_checkpoints
+*.ipynb
+
+# ===== Temporary Files =====
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.swp
+
+# ===== Node/npm (if used) =====
+node_modules/
+npm-debug.log
+
+# ===== macOS =====
+.AppleDouble
+.LSOverride
+
+# ===== Windows =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ===== Playwright Browser Downloads =====
+# (Uncomment if you want to exclude browsers from git)
+# .ms-playwright/
+# browsers/
+
+# ===== Misc =====
+.cache/
+*.cache
+.mypy_cache/
+.dmypy.json
+dmypy.json
