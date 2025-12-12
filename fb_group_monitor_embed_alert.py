@@ -7,11 +7,14 @@ fb_group_monitor_embed_alert.py
   * sends Discord EMBED messages for new posts
   * sends re-login ALERT to admin webhook when FB forces login
   * supports headless 24/7 operation (login once interactively to save cookies)
+  * works with any chromium-based browser (Chrome, Edge, Chromium, etc.)
 Notes:
 - Run once with headless=False to login manually and save storage_state=fb_cookies.json
 - Then run headless=True for 24/7.
 """
 
+import os
+import sys
 import time
 import json
 import sqlite3
@@ -21,6 +24,10 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # ===== USER CONFIG =====
+# Browser selection: 'chromium', 'chrome', 'edge', or 'firefox'
+BROWSER_TYPE = "chromium"  # Change to 'chrome' or 'edge' if you prefer
+BROWSER_EXECUTABLE_PATH = None  # Set to specific path if using system browser, e.g., "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+
 GROUPS = [
     "https://www.facebook.com/groups/genshinimpactvnmbvct/",
     "https://www.facebook.com/groups/6911770178952785/",
@@ -137,6 +144,84 @@ def send_alert(message):
         "footer": {"text": "Action required"}
     }
     return post_discord_embed(DISCORD_WEBHOOK_ALERT, embed)
+
+# ===== time parsing (Vietnamese-friendly) =====
+def get_browser_launcher(pw, browser_type=None, executable_path=None):
+    """
+    Get the appropriate browser launcher from Playwright.
+    Supports: chromium, chrome, edge, firefox
+    
+    Args:
+        pw: Playwright instance
+        browser_type: 'chromium', 'chrome', 'edge', or 'firefox'. Defaults to BROWSER_TYPE.
+        executable_path: Optional path to specific browser executable
+        
+    Returns:
+        Browser launcher object or None if browser type not available
+    """
+    browser_type = browser_type or BROWSER_TYPE
+    browser_type = browser_type.lower().strip()
+    
+    try:
+        if browser_type == "chrome":
+            return pw.chromium
+        elif browser_type == "edge":
+            return pw.chromium
+        elif browser_type == "firefox":
+            return pw.firefox
+        elif browser_type == "chromium":
+            return pw.chromium
+        else:
+            print(f"[WARNING] Unknown browser type: {browser_type}. Using chromium.")
+            return pw.chromium
+    except AttributeError as e:
+        print(f"[ERROR] Browser type '{browser_type}' not available: {e}")
+        print("[WARNING] Falling back to chromium")
+        return pw.chromium
+
+def launch_browser(pw, headless=True, browser_type=None, executable_path=None):
+    """
+    Launch browser with proper configuration.
+    
+    Args:
+        pw: Playwright instance
+        headless: Run in headless mode
+        browser_type: 'chromium', 'chrome', 'edge', or 'firefox'
+        executable_path: Optional path to specific browser executable
+        
+    Returns:
+        Browser instance
+    """
+    browser_type = browser_type or BROWSER_TYPE
+    executable_path = executable_path or BROWSER_EXECUTABLE_PATH
+    
+    launcher = get_browser_launcher(pw, browser_type, executable_path)
+    
+    # Launch options
+    launch_args = {
+        "headless": headless,
+    }
+    
+    # Add executable path if specified
+    if executable_path and os.path.isfile(executable_path):
+        launch_args["executable_path"] = executable_path
+        print(f"[BROWSER] Using executable: {executable_path}")
+    
+    try:
+        browser = launcher.launch(**launch_args)
+        print(f"[BROWSER] Launched {browser_type} (headless={headless})")
+        return browser
+    except Exception as e:
+        print(f"[ERROR] Failed to launch {browser_type}: {e}")
+        if executable_path:
+            print("[INFO] Retrying without executable path...")
+            launch_args.pop("executable_path", None)
+            try:
+                browser = launcher.launch(**launch_args)
+                return browser
+            except Exception as e2:
+                print(f"[ERROR] Still failed: {e2}")
+                raise
 
 # ===== time parsing (Vietnamese-friendly) =====
 def parse_facebook_time(text):
@@ -359,23 +444,37 @@ def scan_group_page(page, url, conn, last_alert):
             print("[SEND FAILED]", pid)
     return last_alert
 
-def run_monitor(headless=True):
+def run_monitor(headless=True, browser_type=None, executable_path=None):
     conn = init_db()
     last_alert_time = None
 
     with sync_playwright() as pw:
-        # browser config
-        browser = pw.chromium.launch(headless=headless)
+        # Launch browser with configuration
+        try:
+            browser = launch_browser(pw, headless=headless, browser_type=browser_type, executable_path=executable_path)
+        except Exception as e:
+            print(f"[ERROR] Failed to launch browser: {e}")
+            send_alert(f"FB Monitor: Failed to launch browser - {e}")
+            return
+        
         # try reuse storage_state
         try:
             context = browser.new_context(storage_state=STORAGE_STATE)
         except Exception:
+            print("[INFO] No saved cookies found or cookies invalid, creating new context")
             context = browser.new_context()
 
         page = context.new_page()
         # check login status
-        page.goto("https://www.facebook.com")
-        time.sleep(5)
+        try:
+            page.goto("https://www.facebook.com", timeout=60000)
+            time.sleep(5)
+        except Exception as e:
+            print(f"[ERROR] Failed to navigate to Facebook: {e}")
+            send_alert(f"FB Monitor: Failed to navigate to Facebook - {e}")
+            browser.close()
+            return
+            
         if detect_need_login(page):
             # not logged in
             send_alert("FB Monitor: Not logged in. Run once with headless=False and perform manual login to save cookies to fb_cookies.json.")
@@ -384,33 +483,111 @@ def run_monitor(headless=True):
             return
 
         # main loop
-        print("Starting monitor loop (headless=%s) ..." % headless)
-        while True:
-            for g in GROUPS:
-                last_alert_time = scan_group_page(page, g, conn, last_alert_time)
-                time.sleep(3)
-            print(f"[SLEEP] {CHECK_INTERVAL_MINUTES} minutes...")
-            time.sleep(CHECK_INTERVAL_MINUTES * 60)
+        print("Starting monitor loop (headless=%s, browser=%s) ..." % (headless, browser_type or BROWSER_TYPE))
+        try:
+            while True:
+                for g in GROUPS:
+                    last_alert_time = scan_group_page(page, g, conn, last_alert_time)
+                    time.sleep(3)
+                print(f"[SLEEP] {CHECK_INTERVAL_MINUTES} minutes...")
+                time.sleep(CHECK_INTERVAL_MINUTES * 60)
+        except KeyboardInterrupt:
+            print("[INFO] Monitor stopped by user")
+        finally:
+            browser.close()
 
 # ===== entrypoint (run interactive login save) =====
-def interactive_login_and_save():
+def interactive_login_and_save(browser_type=None, executable_path=None):
     """
     Run once interactively (headless=False). After manual login, save storage_state to file.
+    
+    Args:
+        browser_type: 'chromium', 'chrome', 'edge', or 'firefox'
+        executable_path: Optional path to specific browser executable
     """
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
+        try:
+            browser = launch_browser(pw, headless=False, browser_type=browser_type, executable_path=executable_path)
+        except Exception as e:
+            print(f"[ERROR] Failed to launch browser: {e}")
+            return
+            
         context = browser.new_context()
         page = context.new_page()
-        page.goto("https://www.facebook.com")
-        print("Please login manually in the opened browser window. After login completes and you see your feed, press ENTER here to save cookies.")
-        input("Press ENTER after login...")
-        context.storage_state(path=STORAGE_STATE)
-        print(f"Saved cookies to {STORAGE_STATE}")
-        browser.close()
+        
+        try:
+            page.goto("https://www.facebook.com", timeout=60000)
+            print("Please login manually in the opened browser window. After login completes and you see your feed, press ENTER here to save cookies.")
+            input("Press ENTER after login...")
+            context.storage_state(path=STORAGE_STATE)
+            print(f"Saved cookies to {STORAGE_STATE}")
+        except Exception as e:
+            print(f"[ERROR] Failed during login: {e}")
+        finally:
+            browser.close()
 
 if __name__ == "__main__":
-    # If you need to do interactive login, uncomment the next line and run once:
-     interactive_login_and_save()
-
-    # After cookies saved, run monitor in headless mode:
-    #run_monitor(headless=True)
+    """
+    Usage examples:
+    
+    1. First time setup - Interactive login with default browser (chromium):
+       python fb_group_monitor_embed_alert.py --login
+       
+    2. First time setup - Interactive login with Chrome/Edge:
+       python fb_group_monitor_embed_alert.py --login --browser chrome
+       python fb_group_monitor_embed_alert.py --login --browser edge
+       
+    3. First time setup - Interactive login with specific browser path:
+       python fb_group_monitor_embed_alert.py --login --browser chrome --executable "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+       
+    4. Run monitor in headless mode (after login):
+       python fb_group_monitor_embed_alert.py --monitor
+       python fb_group_monitor_embed_alert.py --monitor --browser chrome
+       
+    5. Run interactive (non-headless) mode:
+       python fb_group_monitor_embed_alert.py --monitor --headless false
+    """
+    
+    # Parse command line arguments
+    args = sys.argv[1:]
+    
+    # Defaults
+    mode = "monitor"  # 'login' or 'monitor'
+    headless = True
+    browser_type = BROWSER_TYPE
+    executable_path = BROWSER_EXECUTABLE_PATH
+    
+    # Parse arguments
+    i = 0
+    while i < len(args):
+        arg = args[i].lower()
+        
+        if arg in ["--login", "-l"]:
+            mode = "login"
+        elif arg in ["--monitor", "-m"]:
+            mode = "monitor"
+        elif arg in ["--headless"]:
+            if i + 1 < len(args):
+                headless = args[i + 1].lower() != "false"
+                i += 1
+        elif arg in ["--browser", "-b"]:
+            if i + 1 < len(args):
+                browser_type = args[i + 1].lower()
+                i += 1
+        elif arg in ["--executable", "-e"]:
+            if i + 1 < len(args):
+                executable_path = args[i + 1]
+                i += 1
+        elif arg in ["--help", "-h"]:
+            print(__doc__)
+            sys.exit(0)
+        
+        i += 1
+    
+    # Execute
+    if mode == "login":
+        print(f"[SETUP] Starting interactive login with {browser_type}...")
+        interactive_login_and_save(browser_type=browser_type, executable_path=executable_path)
+    else:
+        print(f"[MONITOR] Starting in headless={headless} mode with {browser_type}...")
+        run_monitor(headless=headless, browser_type=browser_type, executable_path=executable_path)
