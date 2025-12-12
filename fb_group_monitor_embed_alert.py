@@ -54,7 +54,7 @@ DB_FILE = "seen_posts.db"
 # runtime settings
 MAX_SCROLL = 5
 SCROLL_DELAY = 2
-CHECK_INTERVAL_MINUTES = 5
+CHECK_INTERVAL_MINUTES = 1
 ONLY_POST_LAST_HOURS = 6
 
 # If re-login is detected, avoid spamming alerts; min interval (seconds) between alerts
@@ -507,9 +507,9 @@ def show_interactive_menu():
     print("\n" + "="*60)
     print("FB GROUP MONITOR - QUICK MENU")
     print("="*60)
-    print("\n1. Login (save cookies)")
-    print("2. Monitor (headless mode - 24/7)")
-    print("3. Monitor (interactive mode - see browser)")
+    print(f"\n1. Login (save cookies)")
+    print(f"2. Monitor (use HEADLESS_MODE setting: {HEADLESS_MODE})")
+    print(f"3. Monitor (opposite mode: {not HEADLESS_MODE})")
     print("4. Exit")
     print("\nOr use command line:")
     print("  --login              : Login mode")
@@ -524,20 +524,20 @@ def show_interactive_menu():
     if choice == "1":
         return "login", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
     elif choice == "2":
-        return "monitor", True, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+        return "monitor", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
     elif choice == "3":
-        return "monitor", False, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+        return "monitor", not HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
     elif choice == "4":
         print("[EXIT] Goodbye!")
         sys.exit(0)
     else:
-        print("[ERROR] Invalid choice. Using default (monitor headless).")
-        return "monitor", True, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+        print("[ERROR] Invalid choice. Using default (use HEADLESS_MODE setting).")
+        return "monitor", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
 
 # ===== entrypoint (run interactive login save) =====
 def interactive_login_and_save(browser_type=None, executable_path=None):
     """
-    Run once interactively (headless=False). After manual login, save storage_state to file.
+    Run once interactively (headless=False). After manual login, auto-detect and save cookies.
     
     Args:
         browser_type: 'chromium', 'chrome', 'edge', or 'firefox'
@@ -555,14 +555,103 @@ def interactive_login_and_save(browser_type=None, executable_path=None):
         
         try:
             page.goto("https://www.facebook.com", timeout=60000)
-            print("Please login manually in the opened browser window. After login completes and you see your feed, press ENTER here to save cookies.")
-            input("Press ENTER after login...")
-            context.storage_state(path=STORAGE_STATE)
-            print(f"Saved cookies to {STORAGE_STATE}")
+            
+            print("\n" + "="*70)
+            print("FACEBOOK LOGIN - INSTRUCTIONS")
+            print("="*70)
+            print("1. A browser window has opened showing Facebook")
+            print("2. Log in with your email and password")
+            print("3. Complete any 2-factor authentication if prompted")
+            print("4. Once you see your Facebook feed, the script will:")
+            print("   - Auto-detect successful login")
+            print("   - Automatically save your cookies to fb_cookies.json")
+            print("\n5. Or press Ctrl+C anytime to save and exit")
+            print("="*70 + "\n")
+            
+            # Auto-detect login every 2 seconds
+            login_detected = False
+            attempt = 0
+            max_attempts = 300  # 10 minutes timeout
+            
+            while attempt < max_attempts:
+                try:
+                    # Check if we're on the feed (logged in)
+                    # Look for indicators that user is logged in
+                    url = page.url
+                    content = page.content().lower()
+                    
+                    # Check for login page indicators
+                    is_login_page = "login" in url or "checkpoint" in url or page.query_selector("input#email") is not None
+                    
+                    # Check for feed indicators
+                    has_feed = "feed" in url or "home" in url or ("news feed" in content and not is_login_page)
+                    
+                    # Simple check: if we've moved past login URL
+                    if not is_login_page and (has_feed or page.query_selector("button[aria-label*='Like']") is not None):
+                        print("\n[SUCCESS] Login detected! Saving cookies...")
+                        time.sleep(2)  # Wait a bit more for page to fully load
+                        
+                        # Save cookies BEFORE closing browser
+                        try:
+                            context.storage_state(path=STORAGE_STATE)
+                            print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
+                            login_detected = True
+                        except Exception as save_error:
+                            print(f"[ERROR] Failed to save: {save_error}")
+                        break
+                    
+                    attempt += 1
+                    if attempt % 5 == 0:
+                        print(f"[WAITING] Still waiting for login... ({attempt}s)")
+                    
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    print(f"[CHECK] Checking login status...")
+                    attempt += 1
+                    time.sleep(1)
+            
+            if not login_detected:
+                # Timeout - ask user to save manually
+                print("\n[TIMEOUT] Auto-detection took too long.")
+                print("[INFO] Trying to save cookies anyway...")
+                try:
+                    context.storage_state(path=STORAGE_STATE)
+                    print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
+                except Exception as e:
+                    print(f"[ERROR] Could not save cookies: {e}")
+                    print("Please try again or log in manually")
+                    
+        except KeyboardInterrupt:
+            # User pressed Ctrl+C - try to save before closing
+            print("\n[USER] Ctrl+C pressed. Saving cookies...")
+            try:
+                context.storage_state(path=STORAGE_STATE)
+                print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
+            except Exception as e:
+                print(f"[ERROR] Could not save cookies: {e}")
         except Exception as e:
             print(f"[ERROR] Failed during login: {e}")
+            # Try to save anyway
+            try:
+                context.storage_state(path=STORAGE_STATE)
+                print(f"[INFO] Tried to save cookies despite error")
+            except:
+                pass
         finally:
-            browser.close()
+            try:
+                page.close()
+            except:
+                pass
+            try:
+                context.close()
+            except:
+                pass
+            try:
+                browser.close()
+            except:
+                pass
+            print("[INFO] Browser closed.")
 
 if __name__ == "__main__":
     """
