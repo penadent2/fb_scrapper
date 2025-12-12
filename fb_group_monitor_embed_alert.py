@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 
 # ===== USER CONFIG =====
 # Browser selection: 'chromium', 'chrome', 'edge', or 'firefox'
-BROWSER_TYPE = "chromium"  # Change to 'chrome' or 'edge' if you prefer
+BROWSER_TYPE = "edge"  # Change to 'chrome' or 'edge' if you prefer
 BROWSER_EXECUTABLE_PATH = None  # Set to specific path if using system browser, e.g., "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
 
 GROUPS = [
@@ -59,6 +59,10 @@ ONLY_POST_LAST_HOURS = 6
 
 # If re-login is detected, avoid spamming alerts; min interval (seconds) between alerts
 ALERT_COOLDOWN = 60 * 30  # 30 minutes
+
+# Quick toggle: Set to True for headless, False for interactive
+# This is the DEFAULT when running without arguments
+HEADLESS_MODE = False
 
 # ===== DB helpers =====
 def init_db():
@@ -496,6 +500,40 @@ def run_monitor(headless=True, browser_type=None, executable_path=None):
         finally:
             browser.close()
 
+def show_interactive_menu():
+    """
+    Show interactive menu to quickly choose mode and options without command line.
+    """
+    print("\n" + "="*60)
+    print("FB GROUP MONITOR - QUICK MENU")
+    print("="*60)
+    print("\n1. Login (save cookies)")
+    print("2. Monitor (headless mode - 24/7)")
+    print("3. Monitor (interactive mode - see browser)")
+    print("4. Exit")
+    print("\nOr use command line:")
+    print("  --login              : Login mode")
+    print("  --monitor            : Monitor with HEADLESS_MODE setting")
+    print("  --headless false     : Run monitor in interactive mode")
+    print("  --browser chromium   : Choose browser")
+    print("  --help               : Show all options")
+    print("="*60)
+    
+    choice = input("\nEnter choice (1-4): ").strip()
+    
+    if choice == "1":
+        return "login", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+    elif choice == "2":
+        return "monitor", True, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+    elif choice == "3":
+        return "monitor", False, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+    elif choice == "4":
+        print("[EXIT] Goodbye!")
+        sys.exit(0)
+    else:
+        print("[ERROR] Invalid choice. Using default (monitor headless).")
+        return "monitor", True, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
+
 # ===== entrypoint (run interactive login save) =====
 def interactive_login_and_save(browser_type=None, executable_path=None):
     """
@@ -530,34 +568,39 @@ if __name__ == "__main__":
     """
     Usage examples:
     
-    1. First time setup - Interactive login with default browser (chromium):
+    1. Run with interactive menu (fastest):
+       python fb_group_monitor_embed_alert.py
+       
+    2. Interactive login:
        python fb_group_monitor_embed_alert.py --login
        
-    2. First time setup - Interactive login with Chrome/Edge:
-       python fb_group_monitor_embed_alert.py --login --browser chrome
-       python fb_group_monitor_embed_alert.py --login --browser edge
-       
-    3. First time setup - Interactive login with specific browser path:
-       python fb_group_monitor_embed_alert.py --login --browser chrome --executable "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-       
-    4. Run monitor in headless mode (after login):
+    3. Monitor (uses HEADLESS_MODE setting):
        python fb_group_monitor_embed_alert.py --monitor
-       python fb_group_monitor_embed_alert.py --monitor --browser chrome
        
-    5. Run interactive (non-headless) mode:
+    4. Monitor headless:
+       python fb_group_monitor_embed_alert.py --monitor
+       
+    5. Monitor interactive (see browser):
        python fb_group_monitor_embed_alert.py --monitor --headless false
+       
+    6. Quick config:
+       Edit HEADLESS_MODE = True/False at top of script
     """
     
     # Parse command line arguments
     args = sys.argv[1:]
     
-    # Defaults
-    mode = "monitor"  # 'login' or 'monitor'
-    headless = True
-    browser_type = BROWSER_TYPE
-    executable_path = BROWSER_EXECUTABLE_PATH
-    
-    # Parse arguments
+    # If no arguments, show interactive menu
+    if not args:
+        mode, headless, browser_type, executable_path = show_interactive_menu()
+    else:
+        # Defaults
+        mode = "monitor"  # 'login' or 'monitor'
+        headless = HEADLESS_MODE  # Use config setting
+        browser_type = BROWSER_TYPE
+        executable_path = BROWSER_EXECUTABLE_PATH
+        
+        # Parse arguments
     i = 0
     while i < len(args):
         arg = args[i].lower()
