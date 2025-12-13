@@ -537,121 +537,105 @@ def show_interactive_menu():
 # ===== entrypoint (run interactive login save) =====
 def interactive_login_and_save(browser_type=None, executable_path=None):
     """
-    Run once interactively (headless=False). After manual login, auto-detect and save cookies.
+    Run once interactively (headless=False). After manual login, save cookies.
     
     Args:
         browser_type: 'chromium', 'chrome', 'edge', or 'firefox'
         executable_path: Optional path to specific browser executable
     """
-    with sync_playwright() as pw:
-        try:
-            browser = launch_browser(pw, headless=False, browser_type=browser_type, executable_path=executable_path)
-        except Exception as e:
-            print(f"[ERROR] Failed to launch browser: {e}")
-            return
+    browser = None
+    context = None
+    page = None
+    
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = launch_browser(pw, headless=False, browser_type=browser_type, executable_path=executable_path)
+            except Exception as e:
+                print(f"[ERROR] Failed to launch browser: {e}")
+                return
+                
+            context = browser.new_context()
+            page = context.new_page()
             
-        context = browser.new_context()
-        page = context.new_page()
-        
-        try:
-            page.goto("https://www.facebook.com", timeout=60000)
-            
-            print("\n" + "="*70)
-            print("FACEBOOK LOGIN - INSTRUCTIONS")
-            print("="*70)
-            print("1. A browser window has opened showing Facebook")
-            print("2. Log in with your email and password")
-            print("3. Complete any 2-factor authentication if prompted")
-            print("4. Once you see your Facebook feed, the script will:")
-            print("   - Auto-detect successful login")
-            print("   - Automatically save your cookies to fb_cookies.json")
-            print("\n5. Or press Ctrl+C anytime to save and exit")
-            print("="*70 + "\n")
-            
-            # Auto-detect login every 2 seconds
-            login_detected = False
-            attempt = 0
-            max_attempts = 300  # 10 minutes timeout
-            
-            while attempt < max_attempts:
-                try:
-                    # Check if we're on the feed (logged in)
-                    # Look for indicators that user is logged in
-                    url = page.url
-                    content = page.content().lower()
-                    
-                    # Check for login page indicators
-                    is_login_page = "login" in url or "checkpoint" in url or page.query_selector("input#email") is not None
-                    
-                    # Check for feed indicators
-                    has_feed = "feed" in url or "home" in url or ("news feed" in content and not is_login_page)
-                    
-                    # Simple check: if we've moved past login URL
-                    if not is_login_page and (has_feed or page.query_selector("button[aria-label*='Like']") is not None):
-                        print("\n[SUCCESS] Login detected! Saving cookies...")
-                        time.sleep(2)  # Wait a bit more for page to fully load
-                        
-                        # Save cookies BEFORE closing browser
-                        try:
-                            context.storage_state(path=STORAGE_STATE)
-                            print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
-                            login_detected = True
-                        except Exception as save_error:
-                            print(f"[ERROR] Failed to save: {save_error}")
-                        break
-                    
-                    attempt += 1
-                    if attempt % 5 == 0:
-                        print(f"[WAITING] Still waiting for login... ({attempt}s)")
-                    
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    print(f"[CHECK] Checking login status...")
-                    attempt += 1
-                    time.sleep(1)
-            
-            if not login_detected:
-                # Timeout - ask user to save manually
-                print("\n[TIMEOUT] Auto-detection took too long.")
-                print("[INFO] Trying to save cookies anyway...")
+            try:
+                page.goto("https://www.facebook.com", timeout=60000)
+                
+                print("\n" + "="*70)
+                print("FACEBOOK LOGIN - INSTRUCTIONS")
+                print("="*70)
+                print("1. A browser window has opened")
+                print("2. Log in with your email and password")
+                print("3. Complete any 2-factor authentication if required")
+                print("4. When you see your Facebook feed (not login page):")
+                print("   COME BACK HERE AND PRESS ENTER to save cookies")
+                print("\n   Do NOT close the browser - press ENTER here when ready!")
+                print("="*70 + "\n")
+                
+                # Wait for user to press ENTER
+                input("[WAITING] Press ENTER when you're logged in and see your feed: ")
+                
+                print("\n[SAVING] Saving your cookies...")
+                time.sleep(1)
+                
+                # SAVE COOKIES
+                if not context:
+                    print("[ERROR] Context is None, cannot save")
+                    return
+                
                 try:
                     context.storage_state(path=STORAGE_STATE)
-                    print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
-                except Exception as e:
-                    print(f"[ERROR] Could not save cookies: {e}")
-                    print("Please try again or log in manually")
+                    print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}!")
+                    print(f"[SUCCESS] You can now close the browser window.")
                     
-        except KeyboardInterrupt:
-            # User pressed Ctrl+C - try to save before closing
-            print("\n[USER] Ctrl+C pressed. Saving cookies...")
-            try:
-                context.storage_state(path=STORAGE_STATE)
-                print(f"[SUCCESS] Cookies saved to {STORAGE_STATE}")
+                except Exception as save_error:
+                    print(f"[ERROR] Could not save cookies: {save_error}")
+                    print(f"[RETRY] Attempting again...")
+                    try:
+                        context.storage_state(path=STORAGE_STATE)
+                        print(f"[SUCCESS] Cookies saved on retry!")
+                    except Exception as retry_error:
+                        print(f"[ERROR] Still failed: {retry_error}")
+                    
+            except KeyboardInterrupt:
+                print("\n[USER] Ctrl+C pressed. Saving cookies...")
+                if context:
+                    try:
+                        context.storage_state(path=STORAGE_STATE)
+                        print(f"[SUCCESS] Cookies saved!")
+                    except Exception as e:
+                        print(f"[ERROR] Could not save: {e}")
+                        
             except Exception as e:
-                print(f"[ERROR] Could not save cookies: {e}")
-        except Exception as e:
-            print(f"[ERROR] Failed during login: {e}")
-            # Try to save anyway
-            try:
-                context.storage_state(path=STORAGE_STATE)
-                print(f"[INFO] Tried to save cookies despite error")
-            except:
-                pass
-        finally:
+                print(f"[ERROR] Exception: {e}")
+                if context:
+                    try:
+                        context.storage_state(path=STORAGE_STATE)
+                        print(f"[INFO] Cookies saved despite error")
+                    except:
+                        pass
+    
+    finally:
+        # Close in correct order: page -> context -> browser
+        if page:
             try:
                 page.close()
             except:
                 pass
+        
+        if context:
             try:
                 context.close()
             except:
                 pass
+        
+        if browser:
             try:
                 browser.close()
             except:
                 pass
-            print("[INFO] Browser closed.")
+        
+        print("[INFO] Browser closed.")
 
 if __name__ == "__main__":
     """
