@@ -6,11 +6,12 @@ fb_group_monitor_embed_alert.py
   * dedupe via SQLite
   * sends Discord EMBED messages for new posts
   * sends re-login ALERT to admin webhook when FB forces login
-  * supports headless 24/7 operation (login once interactively to save cookies)
+  * supports headless 24/7 operation with persistent login session
   * works with any chromium-based browser (Chrome, Edge, Chromium, etc.)
 Notes:
-- Run once with headless=False to login manually and save storage_state=fb_cookies.json
-- Then run headless=True for 24/7.
+- Login once when starting the monitor - browser stays open and keeps the session alive
+- No need to save/load cookies - just keep the browser running
+- For headless mode: login will be required on first run, then session persists
 """
 
 import os
@@ -55,14 +56,17 @@ DB_FILE = "seen_posts.db"
 MAX_SCROLL = 5
 SCROLL_DELAY = 2
 CHECK_INTERVAL_MINUTES = 1
-ONLY_POST_LAST_HOURS = 6
+ONLY_POST_LAST_HOURS = 168
 
 # If re-login is detected, avoid spamming alerts; min interval (seconds) between alerts
 ALERT_COOLDOWN = 60 * 30  # 30 minutes
 
+# Checkpoint wait time (seconds) - how long to wait for user to complete checkpoint
+CHECKPOINT_WAIT_TIME = 120  # 2 minutes
+
 # Quick toggle: Set to True for headless, False for interactive
 # This is the DEFAULT when running without arguments
-HEADLESS_MODE = False
+HEADLESS_MODE = True
 
 # ===== DB helpers =====
 def init_db():
@@ -201,11 +205,31 @@ def launch_browser(pw, headless=True, browser_type=None, executable_path=None):
     
     launcher = get_browser_launcher(pw, browser_type, executable_path)
     
-    # Launch options
-    launch_args = {
-        "headless": headless,
-    }
-    
+    # Launch options with anti-detection args
+    # Use new headless mode which is harder to detect
+    if headless:
+        launch_args = {
+            "headless": False,  # Don't use old headless
+            "args": [
+                '--headless=new',  # Use new headless mode
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--window-size=1280,720',
+            ]
+        }
+    else:
+        launch_args = {
+            "headless": False,
+            "args": [
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1280,720',
+            ]
+        }
+
     # Add executable path if specified
     if executable_path and os.path.isfile(executable_path):
         launch_args["executable_path"] = executable_path
@@ -412,11 +436,42 @@ def scan_group_page(page, url, conn, last_alert):
     if detect_need_login(page):
         now = time.time()
         if last_alert is None or (now - last_alert) > ALERT_COOLDOWN:
-            send_alert(f"Facebook requested login/checkpoint when opening {url}. Manual intervention required.")
+            print("\n" + "="*70)
+            print("⚠️  FACEBOOK CHECKPOINT/LOGIN REQUIRED")
+            print("="*70)
+            print(f"Facebook is asking for verification when opening: {url}")
+            print("\nPlease complete the checkpoint in the browser window:")
+            print("1. Complete any security checks")
+            print("2. Verify your identity if asked")
+            print("3. Wait until you can see the group page")
+            print("\nMonitor will pause for 2 minutes to let you complete this.")
+            print("="*70 + "\n")
+
+            send_alert(f"⚠️ Facebook checkpoint required when opening {url}. Please check the browser and complete verification.")
             last_alert = now
+
+            # Wait for user to complete checkpoint
+            print(f"[WAITING] Pausing for {CHECKPOINT_WAIT_TIME} seconds to allow checkpoint completion...")
+            time.sleep(CHECKPOINT_WAIT_TIME)
+
+            # Try to reload the page
+            try:
+                print("[RETRY] Attempting to reload the group page...")
+                page.goto(url, timeout=60000)
+                time.sleep(4)
+
+                # Check again
+                if detect_need_login(page):
+                    print("[ERROR] Still showing checkpoint. Skipping this group for now.")
+                    return last_alert
+                else:
+                    print("[SUCCESS] Checkpoint completed! Continuing scan...")
+            except Exception as e:
+                print(f"[ERROR] Failed to reload after checkpoint: {e}")
+                return last_alert
         else:
-            print("[ALERT] login detected but in cooldown.")
-        return last_alert
+            print("[ALERT] Checkpoint detected but in cooldown. Skipping this group.")
+            return last_alert
 
     html_all = ""
     for _ in range(MAX_SCROLL):
@@ -448,7 +503,35 @@ def scan_group_page(page, url, conn, last_alert):
             print("[SEND FAILED]", pid)
     return last_alert
 
+def run_monitor_with_auto_restart(headless=True, browser_type=None, executable_path=None):
+    """
+    Wrapper function that automatically restarts monitor if browser is closed.
+    """
+    print("[INFO] Monitor with auto-restart enabled")
+    print("[INFO] If you close the browser, script will restart automatically")
+    print("[INFO] Press Ctrl+C to stop completely\n")
+
+    while True:
+        try:
+            run_monitor(headless=headless, browser_type=browser_type, executable_path=executable_path)
+            # If run_monitor returns normally, it means browser was closed
+            print("\n[INFO] Browser was closed. Restarting in 5 seconds...")
+            print("[INFO] Press Ctrl+C now if you want to stop\n")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[INFO] Monitor stopped by user. Exiting...")
+            break
+        except Exception as e:
+            print(f"\n[ERROR] Unexpected error: {e}")
+            print("[INFO] Restarting in 10 seconds...")
+            time.sleep(10)
+
 def run_monitor(headless=True, browser_type=None, executable_path=None):
+    """
+    Run monitor with persistent login session.
+    Login once, keep browser open, and continuously scan groups.
+    No need to save/load cookies - just keep the session alive.
+    """
     conn = init_db()
     last_alert_time = None
 
@@ -460,16 +543,59 @@ def run_monitor(headless=True, browser_type=None, executable_path=None):
             print(f"[ERROR] Failed to launch browser: {e}")
             send_alert(f"FB Monitor: Failed to launch browser - {e}")
             return
-        
-        # try reuse storage_state
-        try:
-            context = browser.new_context(storage_state=STORAGE_STATE)
-        except Exception:
-            print("[INFO] No saved cookies found or cookies invalid, creating new context")
-            context = browser.new_context()
 
+        # Create context with anti-detection settings (no cookies needed)
+        context_options = {
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+            'viewport': {'width': 1280, 'height': 720},
+            'locale': 'vi-VN',
+            'timezone_id': 'Asia/Ho_Chi_Minh',
+            'ignore_https_errors': True,
+            'extra_http_headers': {
+                'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            }
+        }
+
+        context = browser.new_context(**context_options)
         page = context.new_page()
-        # check login status
+
+        # Add script to hide automation indicators
+        try:
+            page.add_init_script("""
+                // Overwrite the `navigator.webdriver` property
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+
+                // Overwrite the `plugins` property to use a custom getter
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+
+                // Overwrite the `languages` property
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['vi-VN', 'vi', 'en-US', 'en']
+                });
+
+                // Pass the Chrome Test
+                window.chrome = {
+                    runtime: {}
+                };
+
+                // Pass the Permissions Test
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            """)
+        except Exception as e:
+            print(f"[WARNING] Could not add anti-detection script: {e}")
+
+        # Navigate to Facebook
+        print("[INFO] Opening Facebook...")
         try:
             page.goto("https://www.facebook.com", timeout=60000)
             time.sleep(5)
@@ -478,27 +604,101 @@ def run_monitor(headless=True, browser_type=None, executable_path=None):
             send_alert(f"FB Monitor: Failed to navigate to Facebook - {e}")
             browser.close()
             return
-            
-        if detect_need_login(page):
-            # not logged in
-            send_alert("FB Monitor: Not logged in. Run once with headless=False and perform manual login to save cookies to fb_cookies.json.")
-            print("NOT LOGGED IN. Run with headless=False for manual login and save storage_state.")
-            browser.close()
-            return
 
-        # main loop
-        print("Starting monitor loop (headless=%s, browser=%s) ..." % (headless, browser_type or BROWSER_TYPE))
+        # Check if login is needed
+        if detect_need_login(page):
+            print("\n" + "="*60)
+            print("FACEBOOK LOGIN REQUIRED")
+            print("="*60)
+            print("Please login to Facebook in the browser window.")
+            print("After you see your Facebook feed, the monitor will start automatically.")
+            print("="*60 + "\n")
+
+            # Wait for user to login (check every 5 seconds)
+            login_timeout = 300  # 5 minutes timeout
+            elapsed = 0
+            while detect_need_login(page) and elapsed < login_timeout:
+                time.sleep(5)
+                elapsed += 5
+                try:
+                    # Refresh page check
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except:
+                    pass
+
+            if detect_need_login(page):
+                print("[ERROR] Login timeout. Please try again.")
+                send_alert("FB Monitor: Login timeout - user did not complete login in time.")
+                browser.close()
+                return
+
+            print("[SUCCESS] Login detected! Starting monitor...")
+        else:
+            print("[SUCCESS] Already logged in!")
+
+        # main loop - keep scanning with the same session
+        print(f"Starting monitor loop (headless={headless}, browser={browser_type or BROWSER_TYPE})...")
+        print(f"Monitoring {len(GROUPS)} groups every {CHECK_INTERVAL_MINUTES} minutes")
+        print("Press Ctrl+C to stop.\n")
+
         try:
             while True:
                 for g in GROUPS:
-                    last_alert_time = scan_group_page(page, g, conn, last_alert_time)
+                    # Check if browser/page is still alive before scanning
+                    try:
+                        # Try to get current URL to check if page is still alive
+                        _ = page.url
+
+                        # Check if still logged in
+                        if detect_need_login(page):
+                            print("[WARNING] Session expired - login required again!")
+                            send_alert("FB Monitor: Session expired - please restart and login again.")
+                            browser.close()
+                            return
+                    except Exception as e:
+                        # Only exit if it's a browser closed error
+                        error_msg = str(e).lower()
+                        if "target closed" in error_msg or "browser has been closed" in error_msg or "context" in error_msg:
+                            print(f"\n[ERROR] Browser/page was closed: {e}")
+                            print("[INFO] Browser was closed manually. Exiting...")
+                            send_alert("FB Monitor: Browser was closed manually. Monitor stopped.")
+                            return
+                        else:
+                            # Other errors, just log and continue
+                            print(f"[WARNING] Error checking page status: {e}")
+                            print("[INFO] Continuing anyway...")
+
+                    # Scan the group page (this may have its own error handling)
+                    try:
+                        last_alert_time = scan_group_page(page, g, conn, last_alert_time)
+                    except Exception as e:
+                        # Check if browser was closed
+                        error_msg = str(e).lower()
+                        if "target closed" in error_msg or "browser has been closed" in error_msg or "context" in error_msg:
+                            print(f"\n[ERROR] Browser closed during scan: {e}")
+                            print("[INFO] Browser was closed manually. Exiting...")
+                            send_alert("FB Monitor: Browser was closed manually. Monitor stopped.")
+                            return
+                        else:
+                            # Other scan errors, just log and continue to next group
+                            print(f"[ERROR] Error scanning {g}: {e}")
+                            print("[INFO] Continuing to next group...")
+
                     time.sleep(3)
-                print(f"[SLEEP] {CHECK_INTERVAL_MINUTES} minutes...")
+
+                print(f"[SLEEP] Waiting {CHECK_INTERVAL_MINUTES} minutes before next scan...")
                 time.sleep(CHECK_INTERVAL_MINUTES * 60)
         except KeyboardInterrupt:
-            print("[INFO] Monitor stopped by user")
+            print("\n[INFO] Monitor stopped by user")
+        except Exception as e:
+            print(f"\n[ERROR] Monitor crashed: {e}")
+            send_alert(f"FB Monitor: Crashed - {e}")
         finally:
-            browser.close()
+            print("[INFO] Closing browser...")
+            try:
+                browser.close()
+            except:
+                pass  # Browser already closed
 
 def show_interactive_menu():
     """
@@ -507,27 +707,28 @@ def show_interactive_menu():
     print("\n" + "="*60)
     print("FB GROUP MONITOR - QUICK MENU")
     print("="*60)
-    print(f"\n1. Login (save cookies)")
-    print(f"2. Monitor (use HEADLESS_MODE setting: {HEADLESS_MODE})")
-    print(f"3. Monitor (opposite mode: {not HEADLESS_MODE})")
-    print("4. Exit")
-    print("\nOr use command line:")
-    print("  --login              : Login mode")
-    print("  --monitor            : Monitor with HEADLESS_MODE setting")
-    print("  --headless false     : Run monitor in interactive mode")
-    print("  --browser chromium   : Choose browser")
+    print(f"\n1. Start Monitor (Headless: {HEADLESS_MODE})")
+    print(f"2. Start Monitor (Headless: {not HEADLESS_MODE})")
+    print("3. Exit")
+    print("\nHow it works:")
+    print("  - Browser opens and you login to Facebook once")
+    print("  - Monitor keeps the session alive and scans groups")
+    print("  - If you close browser, it will auto-restart!")
+    print("  - No need to save/load cookies anymore!")
+    print("\nCommand line options:")
+    print("  --monitor            : Start monitor with HEADLESS_MODE setting")
+    print("  --headless false     : Run monitor in visible mode")
+    print("  --browser chromium   : Choose browser (chromium/chrome/edge)")
     print("  --help               : Show all options")
     print("="*60)
-    
-    choice = input("\nEnter choice (1-4): ").strip()
-    
+
+    choice = input("\nEnter choice (1-3): ").strip()
+
     if choice == "1":
-        return "login", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
-    elif choice == "2":
         return "monitor", HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
-    elif choice == "3":
+    elif choice == "2":
         return "monitor", not HEADLESS_MODE, BROWSER_TYPE, BROWSER_EXECUTABLE_PATH
-    elif choice == "4":
+    elif choice == "3":
         print("[EXIT] Goodbye!")
         sys.exit(0)
     else:
@@ -640,70 +841,63 @@ def interactive_login_and_save(browser_type=None, executable_path=None):
 if __name__ == "__main__":
     """
     Usage examples:
-    
+
     1. Run with interactive menu (fastest):
        python fb_group_monitor_embed_alert.py
-       
-    2. Interactive login:
-       python fb_group_monitor_embed_alert.py --login
-       
-    3. Monitor (uses HEADLESS_MODE setting):
+
+    2. Start monitor (uses HEADLESS_MODE setting):
        python fb_group_monitor_embed_alert.py --monitor
-       
-    4. Monitor headless:
-       python fb_group_monitor_embed_alert.py --monitor
-       
-    5. Monitor interactive (see browser):
-       python fb_group_monitor_embed_alert.py --monitor --headless false
-       
-    6. Quick config:
+
+    3. Start monitor in visible mode (see browser):
+       python fb_group_monitor_embed_alert.py --headless false
+
+    4. Quick config:
        Edit HEADLESS_MODE = True/False at top of script
+
+    How it works:
+    - Browser opens and prompts you to login to Facebook
+    - After login, monitor starts and keeps the session alive
+    - No need to save/load cookies - session persists while running
     """
-    
+
     # Parse command line arguments
     args = sys.argv[1:]
-    
+
     # If no arguments, show interactive menu
     if not args:
         mode, headless, browser_type, executable_path = show_interactive_menu()
     else:
         # Defaults
-        mode = "monitor"  # 'login' or 'monitor'
+        mode = "monitor"
         headless = HEADLESS_MODE  # Use config setting
         browser_type = BROWSER_TYPE
         executable_path = BROWSER_EXECUTABLE_PATH
-        
+
         # Parse arguments
-    i = 0
-    while i < len(args):
-        arg = args[i].lower()
-        
-        if arg in ["--login", "-l"]:
-            mode = "login"
-        elif arg in ["--monitor", "-m"]:
-            mode = "monitor"
-        elif arg in ["--headless"]:
-            if i + 1 < len(args):
-                headless = args[i + 1].lower() != "false"
-                i += 1
-        elif arg in ["--browser", "-b"]:
-            if i + 1 < len(args):
-                browser_type = args[i + 1].lower()
-                i += 1
-        elif arg in ["--executable", "-e"]:
-            if i + 1 < len(args):
-                executable_path = args[i + 1]
-                i += 1
-        elif arg in ["--help", "-h"]:
-            print(__doc__)
-            sys.exit(0)
-        
-        i += 1
-    
-    # Execute
-    if mode == "login":
-        print(f"[SETUP] Starting interactive login with {browser_type}...")
-        interactive_login_and_save(browser_type=browser_type, executable_path=executable_path)
-    else:
-        print(f"[MONITOR] Starting in headless={headless} mode with {browser_type}...")
-        run_monitor(headless=headless, browser_type=browser_type, executable_path=executable_path)
+        i = 0
+        while i < len(args):
+            arg = args[i].lower()
+
+            if arg in ["--monitor", "-m"]:
+                mode = "monitor"
+            elif arg in ["--headless"]:
+                if i + 1 < len(args):
+                    headless = args[i + 1].lower() != "false"
+                    i += 1
+            elif arg in ["--browser", "-b"]:
+                if i + 1 < len(args):
+                    browser_type = args[i + 1].lower()
+                    i += 1
+            elif arg in ["--executable", "-e"]:
+                if i + 1 < len(args):
+                    executable_path = args[i + 1]
+                    i += 1
+            elif arg in ["--help", "-h"]:
+                print(__doc__)
+                sys.exit(0)
+
+            i += 1
+
+    # Execute with auto-restart
+    print(f"[MONITOR] Starting in headless={headless} mode with {browser_type}...")
+    run_monitor_with_auto_restart(headless=headless, browser_type=browser_type, executable_path=executable_path)
